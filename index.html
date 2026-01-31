@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Overtime Pro - Ultra Fast</title>
+    <!-- Tailwind CSS (Estilos) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #F8FAFC; -webkit-tap-highlight-color: transparent; }
+        .glass-card { background: white; border: 1px solid #e2e8f0; }
+        .animate-bounce-slow { animation: bounce 2s infinite; }
+        @keyframes bounce { 0%, 100% { transform: translateY(-5%); } 50% { transform: translateY(0); } }
+        /* Optimizaciones de renderizado */
+        * { box-sizing: border-box; }
+        .loading-spinner { border-top-color: #4f46e5; animation: spinner 0.6s linear infinite; }
+        @keyframes spinner { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="pb-24">
+    <div id="app"></div>
+
+    <!-- Carga de librerías ligeras (Sin Babel para máxima velocidad) -->
+    <script type="module">
+        import { h, render } from 'https://unpkg.com/preact@latest?module';
+        import { useState, useEffect, useMemo } from 'https://unpkg.com/preact@latest/hooks/dist/hooks.module.js?module';
+        import htm from 'https://unpkg.com/htm?module';
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, onSnapshot, deleteDoc, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+        const html = htm.bind(h);
+
+        // --- CONFIGURACIÓN DE FIREBASE ---
+        // IMPORTANTE: Pon tus datos aquí para que funcione en tu GitHub Pages
+        const firebaseConfig = {
+            apiKey: "TU_API_KEY",
+            authDomain: "tu-proyecto.firebaseapp.com",
+            projectId: "tu-proyecto",
+            storageBucket: "tu-proyecto.appspot.com",
+            messagingSenderId: "12345678",
+            appId: "1:12345678:web:abcdefg"
+        };
+
+        // Fallback para entorno de desarrollo
+        const finalConfig = window.__firebase_config ? JSON.parse(window.__firebase_config) : firebaseConfig;
+        const app = initializeApp(finalConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = window.__app_id || 'overtime-pro-v3';
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [entries, setEntries] = useState([]);
+            const [viewingDate, setViewingDate] = useState(new Date());
+            const [loading, setLoading] = useState(true);
+            const [toast, setToast] = useState({ show: false, msg: '' });
+            const [config, setConfig] = useState({ baseIn: "08:00", baseOut: "16:45" });
+            const [formData, setFormData] = useState({
+                date: new Date().toISOString().split('T')[0],
+                actualOut: '',
+                note: ''
+            });
+
+            useEffect(() => {
+                const unsubAuth = onAuthStateChanged(auth, async (u) => {
+                    if (!u) {
+                        try { await signInAnonymously(auth); } catch(e) { console.error(e); }
+                    } else {
+                        setUser(u);
+                        // Cargar Config
+                        onSnapshot(doc(db, 'artifacts', appId, 'users', u.uid, 'settings', 'userConfig'), (snap) => {
+                            if (snap.exists()) setConfig(snap.data());
+                        });
+                        // Cargar Entradas
+                        onSnapshot(collection(db, 'artifacts', appId, 'users', u.uid, 'entries'), (snap) => {
+                            setEntries(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                            setLoading(false);
+                            setTimeout(() => lucide.createIcons(), 100);
+                        });
+                    }
+                });
+                return () => unsubAuth();
+            }, []);
+
+            const showToast = (msg) => {
+                setToast({ show: true, msg });
+                setTimeout(() => setToast({ show: false, msg: '' }), 3000);
+            };
+
+            const calculateExtra = (outTime) => {
+                const toMin = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+                const actOutM = toMin(outTime);
+                const baseOutM = toMin(config.baseOut);
+                let extra = Math.max(0, actOutM - baseOutM);
+                if (actOutM < toMin(config.baseIn)) extra = (actOutM + 1440) - baseOutM;
+                return extra;
+            };
+
+            const formatMinutes = (m) => `${Math.floor(m / 60)}h ${m % 60}m`;
+
+            const filtered = useMemo(() => entries.filter(e => {
+                const d = new Date(e.date + "T00:00:00");
+                return d.getMonth() === viewingDate.getMonth() && d.getFullYear() === viewingDate.getFullYear();
+            }).sort((a, b) => new Date(b.date) - new Date(a.date)), [entries, viewingDate]);
+
+            const monthMins = useMemo(() => filtered.reduce((acc, c) => acc + calculateExtra(c.actualOut), 0), [filtered, config]);
+
+            if (loading) return html`
+                <div class="h-screen flex flex-col items-center justify-center bg-slate-50">
+                    <div class="w-12 h-12 border-4 border-slate-200 loading-spinner rounded-full mb-4"></div>
+                    <p class="text-slate-400 font-bold text-xs uppercase tracking-widest">Iniciando Cloud...</p>
+                </div>
+            `;
+
+            return html`
+                <div class="max-w-2xl mx-auto p-4 md:p-6 animate-in fade-in duration-500">
+                    <header class="flex justify-between items-end mb-8">
+                        <div>
+                            <h1 class="text-3xl font-black text-slate-900 leading-tight tracking-tight">Overtime <span class="text-indigo-600">Pro</span></h1>
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1">
+                                <span class="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span> Conexión Directa
+                            </p>
+                        </div>
+                    </header>
+
+                    <div class="glass-card rounded-[2rem] p-2 flex items-center justify-between mb-6 shadow-sm">
+                        <button onClick=${() => setViewingDate(new Date(viewingDate.setMonth(viewingDate.getMonth() - 1)))} class="p-3 hover:bg-slate-50 rounded-2xl transition-colors">
+                            <i data-lucide="chevron-left" class="text-slate-400"></i>
+                        </button>
+                        <div class="text-center">
+                            <h2 class="text-sm font-black capitalize text-slate-800">${viewingDate.toLocaleDateString('es', { month: 'long', year: 'numeric' })}</h2>
+                            <button onClick=${() => setViewingDate(new Date())} class="text-[9px] font-bold text-indigo-500 uppercase">Hoy</button>
+                        </div>
+                        <button onClick=${() => setViewingDate(new Date(viewingDate.setMonth(viewingDate.getMonth() + 1)))} class="p-3 hover:bg-slate-50 rounded-2xl transition-colors">
+                            <i data-lucide="chevron-right" class="text-slate-400"></i>
+                        </button>
+                    </div>
+
+                    <div class="bg-indigo-600 rounded-[2.5rem] p-8 text-white mb-8 shadow-2xl shadow-indigo-100 relative overflow-hidden">
+                        <div class="relative z-10">
+                            <p class="text-[10px] font-bold uppercase tracking-widest opacity-70 mb-1">Extras acumuladas</p>
+                            <h3 class="text-5xl font-black">${formatMinutes(monthMins)}</h3>
+                        </div>
+                        <div class="absolute -right-6 -bottom-6 opacity-10 rotate-12 scale-150">
+                            <i data-lucide="clock" size="100"></i>
+                        </div>
+                    </div>
+
+                    <div class="glass-card rounded-[2.5rem] p-6 mb-10 shadow-sm">
+                        <div class="space-y-4">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="text-[10px] font-bold text-slate-400 uppercase ml-2">Fecha</label>
+                                    <input type="date" value=${formData.date} onInput=${e => setFormData({...formData, date: e.target.value})} class="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm outline-none mt-1" />
+                                </div>
+                                <div>
+                                    <label class="text-[10px] font-bold text-slate-400 uppercase ml-2">Salida Real</label>
+                                    <input type="time" value=${formData.actualOut} onInput=${e => setFormData({...formData, actualOut: e.target.value})} class="w-full p-4 bg-indigo-50 text-indigo-700 font-black border-none rounded-2xl text-lg outline-none mt-1" />
+                                </div>
+                            </div>
+                            <input type="text" placeholder="¿Qué hiciste hoy? (opcional)" value=${formData.note} onInput=${e => setFormData({...formData, note: e.target.value})} class="w-full p-4 bg-slate-50 border-none rounded-2xl text-sm outline-none" />
+                            <button onClick=${async () => {
+                                if (!formData.date || !formData.actualOut) return showToast('⚠️ Datos incompletos');
+                                await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'entries'), { ...formData, createdAt: new Date().toISOString() });
+                                setFormData({ ...formData, actualOut: '', note: '' });
+                                showToast('✅ Sincronizado');
+                            }} class="w-full bg-slate-900 text-white font-bold py-5 rounded-[1.8rem] active:scale-95 transition-all shadow-xl">
+                                GUARDAR EN LA NUBE
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="space-y-4">
+                        <h3 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-2 mb-2">Historial</h3>
+                        ${filtered.length === 0 ? html`
+                            <div class="text-center py-16 text-slate-300 font-medium text-sm italic bg-white rounded-[2rem] border border-dashed border-slate-200">
+                                Sin registros este mes
+                            </div>
+                        ` : filtered.map(entry => {
+                            const dateObj = new Date(entry.date + "T00:00:00");
+                            return html`
+                                <div key=${entry.id} class="glass-card p-5 rounded-[2rem] flex justify-between items-center shadow-sm hover:border-indigo-100 transition-all group">
+                                    <div class="flex items-center gap-5">
+                                        <div class="bg-slate-50 w-14 h-14 rounded-[1.2rem] flex flex-col items-center justify-center border border-slate-100 group-hover:bg-indigo-50 transition-colors">
+                                            <span class="text-[9px] font-bold text-slate-400 uppercase leading-none mb-1">${dateObj.toLocaleDateString('es', {month: 'short'})}</span>
+                                            <span class="text-xl font-black text-slate-700 leading-none">${dateObj.getDate()}</span>
+                                        </div>
+                                        <div>
+                                            <h4 class="text-sm font-bold text-slate-800 capitalize leading-none mb-1">${dateObj.toLocaleDateString('es', {weekday: 'long'})}</h4>
+                                            <p class="text-[10px] text-slate-400 font-medium">Salida: ${entry.actualOut} ${entry.note && `• ${entry.note}`}</p>
+                                        </div>
+                                    </div>
+                                    <div class="text-right">
+                                        <div class="text-xl font-black text-indigo-600 leading-none">+${formatMinutes(calculateExtra(entry.actualOut))}</div>
+                                        <button onClick=${async () => {
+                                            await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'entries', entry.id));
+                                            showToast('🗑️ Eliminado');
+                                        }} class="text-[10px] font-bold text-red-200 uppercase hover:text-red-500 transition-colors mt-2">Eliminar</button>
+                                    </div>
+                                </div>
+                            `;
+                        })}
+                    </div>
+
+                    ${toast.show && html`
+                        <div class="fixed bottom-10 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-8 py-4 rounded-full shadow-2xl text-xs font-bold animate-bounce-slow z-50">
+                            ${toast.msg}
+                        </div>
+                    `}
+                </div>
+            `;
+        }
+
+        render(html`<${App} />`, document.getElementById('app'));
+        setTimeout(() => lucide.createIcons(), 500);
+    </script>
+</body>
+</html>
